@@ -1,0 +1,443 @@
+# Copyright (C) 2020
+#This script is a partial fufulment of an Honours Project for Stellenbosch University and
+#was funded by the NRF. As such all licensing and usage of this program
+#is goverened by the afore mentioned parties
+
+#Author:    Keaghan Brown (19771290) (kbrown@sun.ac.za)
+#Author:    Prof. David L. Tabb (Supervisor)
+
+print("Proteostruct software version 3.1.1 (3 November 2020)")
+cmd.reinitialize()
+
+# the following imports various packages and tools needed for the script to read, process and interact with the OS and PyMOL
+from Bio.PDB.PDBParser import PDBParser 
+from Bio.PDB.Polypeptide import PPBuilder
+from Bio.Seq import Seq
+from Bio import SeqIO
+from tkinter import Tk
+from tkinter.filedialog import askdirectory
+from tkinter.filedialog import askopenfilename
+import re
+import os
+import glob, os
+from pymol import cmd
+import sys
+import argparse
+import numpy as np
+import warnings
+from Bio import BiopythonWarning
+warnings.simplefilter('ignore', BiopythonWarning)
+
+   
+parser = argparse.ArgumentParser()                                                          # this enables the script to parse comamnd line arguments for mode/specification
+parser.add_argument('--mode', choices=['SC', 'PTM'], required=False, default='SC')          # the command allows one of 2 modes to be selected SC for the sequence coverage and PTm for the post translational modifications
+parser.add_argument('--PTMID', nargs='+', choices=['OX','MET','PHOS'], required=False)      # the user is prompted to select one or more of the PTMS available if the PTM mode is selected. Their short forms: OX - oxidation, MET - methylation and PHOS - phosphorylation
+parser.add_argument('--coverage', choices=['OC', 'DC'], required=False, default='OC')       # the user is prompted to either select OC- overall coverage of peptides or DC - depth of coverage
+arg = parser.parse_args()
+mode = str(arg.mode)                                                                        # sets the mode argument as a string for downstream processing 
+PTMs = arg.PTMID                                                                            # sets the PTMS argument as a list for downstream processing 
+coverage_type = str(arg.coverage)                                                           # sets the coverage type argument as a string for downstream processing 
+
+
+# the dictionary that matches the shortstring PTM added in the in the command line argument to the mass shift value in the peptides
+all_ptms= []
+short_string_to_mass_value = {'PHOS': '[80]', 'MET': '[57]', 'OX': '[16]'}
+for key in short_string_to_mass_value:
+    all_ptms.append(key)
+
+one_letter ={'VAL':'V', 'ILE':'I', 'LEU':'L', 'GLU':'E', 'GLN':'Q', 
+'ASP':'D', 'ASN':'N', 'HIS':'H', 'TRP':'W', 'PHE':'F', 'TYR':'Y',    
+'ARG':'R', 'LYS':'K', 'SER':'S', 'THR':'T', 'MET':'M', 'ALA':'A',    
+'GLY':'G', 'PRO':'P', 'CYS':'C'}
+
+#these are new dictionaries being created
+parser = PDBParser(PERMISSIVE = 1)
+pdb_files = []
+processed_peptide_list = []      
+pep_match_list = []        
+# this prompts the user to supply the path to the peptide list file
+
+Tk().withdraw()                                                                             # tkinter generates a GUI to allow the user to easily interface with OS
+peptide_list = askopenfilename(title='Select File for Peptide List')                        # the GUI prompts the user to select the file with location of the peptides of interest for the script to analyse
+
+# the script then opens and processes the file
+
+if peptide_list.endswith('.txt'):                                                           # ensures the list is one of 2 formats. This checks for a text document format with only peptides on their own or as a comma delimitted file
+    file = open(peptide_list)                                                               # opens the peptide file selected to be read and edited
+    indiviudal_peptides = file.read().split("\n")                                           # creates a list by splitting the data at each new line present within the file
+    for peptide_data in indiviudal_peptides:                                                # iterates over each variable in the file
+        delimiter = ','                                                                     # specifies that the delimter used is a comma
+        delimiter_in_string = delimiter in peptide_data                                     # determines whether the delimter is in the interated variable and returns a boolean True or False
+        if delimiter_in_string == True:                                                     # creates a either/ or condition based on if the boolean is true -   the script below it to be carried out if its true
+            data_split = peptide_data.split(delimiter)                                      # splits the line at the delimiter creating another list of seperated data
+            for j in data_split:                                                            # iterates over new list 
+                peptide = data_split[0]                                                     # extracts the 1st position in the list which has been identified as the peptide
+            processed_peptide_list.append(peptide)                                          # appends the processed peptide list with the extracted peptides
+        else:                                                                               # alternative script to the 2nd 'if statement' 
+            processed_peptide_list.append(peptide_data)                                     # appends the processed peptide list with the extracted peptides
+elif peptide_list.endswith('.csv'):                                                         # the alternative to the 1st 'if statement'. this ensures the list is in an excel document as a comma delimitted file
+    file = open(peptide_list)                                                               # opens the peptide file selected to be read and edited
+    peptide_data = file.read().split("\n")                                                  # creates a list by splitting the data at each new line present within the file
+    peptide_data.pop(0)                                                                     # removes the 1st variable as it is the headings of each column in the spreadsheet
+    for line in peptide_data:                                                               # for loop iterates over the previous list
+        data_split = line.split(';')                                                        # splits the line at the delimiter creating another list of seperated data
+        for j in data_split:                                                                # nested for loop interates over the previous list
+            peptide = data_split[0]                                                         # variable gets set to the 1st item in the most recent list
+        processed_peptide_list.append(peptide)                                              # appends the processed peptide list with the extracted peptides
+file.close()                                                                                # closes the file thats been opened to ensure no further accidental reading/ editing of contents
+
+
+# this processes the PTM peptide list into peptides without the enzyme snip mass shift and additonal ions
+
+roundone_processed = []                                                                     # creates a list for peptide processing from PTM forming to normal sequence
+seq_as_PTM_id = []                                                                           # creates a list for each sequence in an numerical form with each PTM being 1, 2, 3 or more depending on the PTMs added in the beginning
+    
+if mode == "PTM":                                                                           # the script below will only be carried out if the command line argument --mode has been set to PTM
+     
+    for i in processed_peptide_list:                                                        # the for loop iterates over each element within the list of peptides submitted 
+        seq = str(i)                                                                        # the variable i gets set to the string format to allow edting
+        pro_seq = seq.replace("[229]","")                                                   # the sequence removes the [299] digest resulting in a mass shift. this is present in all peptides and not needed for PTMs
+        if '(' in pro_seq:                                                                  # this searches each sequence for the ion value within the parenthesis and removes it from the sequence
+            pro_seq = pro_seq[0: pro_seq.index('(')-1]                                      # this sets the sequence from the start residue to the point before the start parenthesis
+        roundone_processed.append(pro_seq)                                                  # this appends the PTM processing list the new processed peptide
+
+    counter = 1                                                                             # this counter keeps track of the number of PTMs in the list
+    ptm_key = {}                                                                            # as the user may put the PTMs in different order the dictionary keeps track of which ptm has which ID
+
+    for ptm in PTMs:                                                                        # the for loop iterates over each ptm in the PTM list
+        ptm_mass_shift = str(short_string_to_mass_value[ptm])                               # the variable ptm_mass_shift is set to string format, correlating the short ID to the key in the short_string_to_mass_valuedictionary
+        ptm_key[ptm] = str(counter)                                                         # this sets the key and value to the PTM and the counters' number
+        for j in roundone_processed:                                                        # the loop iterates over all the preprocessed sequences
+            seq = str(j)                                                                    # the variable j is set to the string format
+            seq = seq.replace(ptm_mass_shift,str(counter))                                  # each of the PTM mass in brackets is then replaced with the counter value
+            roundone_processed[roundone_processed.index(j)] = seq                           # once bracket PTMs have been replaced the respective position in the list is replaced with the new sequence
+        counter +=1                                                                         # for each PTM in the PTMs list obtained from the command line argument the counter rises by 1
+    
+    for m in roundone_processed:                                                            # this reiterates over the roundone_processed list 
+        if m == '':                                                                         # this is to identify any empty elements in the list
+            roundone_processed.pop(roundone_processed.index(m))                             # if an empty element is present, it is removed at the position in the list
+
+    excluded_ptms = np.setdiff1d(all_ptms,PTMs)                                             # this identifies those PTMs not present in those supplied in the comamnd line
+    
+    for g in excluded_ptms:                                                                 # the loop then iterates over the excluded_ptms
+        remove_ptm = str(short_string_to_mass_value[g])                                     # the remove_ptm variable is assigned the PTM not included in the comma line argument
+        for h in roundone_processed:                                                        # the loop reiterates over the ptm peptides
+            seq = str(h)                                                                    # the string format is set to the h variable
+            seq = seq.replace(remove_ptm,"")                                                # the sequence has the unwanted PTM removed before further processing
+            roundone_processed[roundone_processed.index(h)] = seq                           # once unwanted bracket PTMs have been replaced, the respective position in the list is replaced with the new sequence
+    
+    for i in roundone_processed:                                                            # the peptides are reiterated in the for loop
+        ptm_binary = []                                                                     # this keeps track of each residue the PTM occurs on
+        for c in i:                                                                         # each character of the seq is iterated over
+            if c.isdigit():
+                ptm_binary.append(c)                                                        # the character in the seq is then added to the PTM_binary variable
+            else:
+                ptm_binary.append('0')                                                      # if the character is not a digit the value 0 gets added indicating no PTM on residue
+        for d in ptm_binary:
+            if int(d) > 0:
+                ptm_binary.pop(ptm_binary.index(d)-1)
+        binary_seq = ""
+        for e in ptm_binary:
+            binary_seq += e
+        seq_as_PTM_id.append(binary_seq)
+    
+    for c in roundone_processed:                                                            # the peptide list is iterated over again to access each sequence
+        seq = str(i)                                                                        # the variable i is set to the string format
+        result = ''.join([i for i in c if not i.isdigit()])                                 # this removed the key IDs of each PTM from the sequence
+        pep_match_list.append(result)                                                       # the procssed peptides ready for matching are added to a new list which wont be edited
+elif mode == "SC":
+    pep_match_list = processed_peptide_list
+    for m in pep_match_list:                                                                # this reiterates over the roundone_processed list 
+        if m == '':                                                                         # this is to identify any empty elements in the list
+            pep_match_list.pop(pep_match_list.index(m))      
+
+# this section prompts the user to supply the path for PDB files to be used and extracts all files with the annotated with the .pdb extension
+
+Tk().withdraw()                                                                             # tkinter generates a GUI to allow the user to easily interface with OS
+PDB_list_path = askdirectory(title='Select Folder for PDB List')                            # the GUI prompts the user to select the folder with location of the PDB files on the PC generating a path for the script 
+os.chdir(PDB_list_path)                                                                     # the OS changes the current working directory to that of pathway selected in the line above
+for file in glob.glob("*.pdb"):                                                             # the for loop looks for every file in the specified pathway and identifies those with the .pdb extension and specifically selects those and appends them to a list
+	pdb_files.append(file)                                                              
+# This section accesses and parse the PDB files individually and extrcats the structure seq and the start and stop positions of each seq/ PTM positions in each PDB
+
+pept_select_list = []
+pdb_ptm_pos = {}
+pdb_chain_len = {}
+pdb_start_stop = {}
+chain_id_pos_range = {}
+pept_chain_match = {}
+pdb_pept_ranges = {}
+pdb_chain_seq = {}
+pdb_start_depth_dictionary = {}
+pdb_stop_depth_dictionary = {}
+depth_selection_dictionary = {}
+depth_coverage_dictionary = {}
+ptm_pos_type_dict = {}
+ptm_selection_dict = {}
+
+for file in pdb_files:                                                                      # a for loop is created to iterate through the pdb files identified in the path
+    structure_id = file                                                                     # sets the ID of the structure as the name of file iterated in the for loop
+    file_name = file                                                                        # sets the file name as the name of the file iterated in the for loop
+    structure = parser.get_structure(structure_id, file_name)                               # sets the variable structure to pull the sequence and file identification 
+    ppbuilder = PPBuilder()                                                                 # constructs the start and stop positions of the chains in the structure based on the function PPBuilder
+    pdb = file.split('.')
+    pdb = pdb[0]
+    pdb_sequence_chain_id_dictionary = {}
+    for record in SeqIO.parse(file, "pdb-seqres"):
+        pdb_sequence_chain_id_dictionary.setdefault("%s" % record.seq, []).append("%s" % (record.annotations["chain"]))
+    for i in ppbuilder.build_peptides(structure):                                           # the for loop iterates over of each chain and the start and stop positions identified in the pdb file
+        chain_sequence = i.get_sequence()                                                   # obtains the sequence of the specific chains in the PDB files
+        chain_start_pos = i[0].get_id()[1]                                                  # gets the start position of each chain 
+        chain_stop_pos = chain_start_pos + len(chain_sequence)
+        chain_len = int(chain_stop_pos) - int(chain_start_pos)
+        pdb = file.split('.')
+        pdb = pdb[0]
+        pept_chain_match.setdefault(pdb, []).append(('%s' % chain_sequence))
+        pdb_chain_len.setdefault(('%s' % chain_sequence), []).append(chain_stop_pos)
+        if mode == "SC":
+            for key in pdb_sequence_chain_id_dictionary:
+                pdb_start_stop[key] = pdb_sequence_chain_id_dictionary[key]
+                sequence = str(key)
+                for j in pep_match_list:
+                    if j in chain_sequence:
+                        pdb_pept_ranges[pdb] = sequence
+                        pept_select_list.append(str(j))
+
+        if coverage_type =="DC":
+            for j in pep_match_list:
+                pept = str(j)
+                if pept in chain_sequence:
+                    start_pos = chain_sequence.index(pept) + 1
+                    if chain_start_pos > 1:
+                        start_pos = (start_pos + chain_start_pos) -1
+                    stop_pos = start_pos + len(pept) -1
+                    pdb_start_depth_dictionary.setdefault(('%s' % chain_sequence), []).append(start_pos)
+                    pdb_stop_depth_dictionary.setdefault(('%s' % chain_sequence), []).append(stop_pos)
+        
+        if mode == "PTM":
+            for k in pep_match_list:
+                pept = str(k)
+                if pept in chain_sequence:
+                    start_pos = chain_sequence.index(pept) + 1
+                    if chain_start_pos > 1:
+                        start_pos = (start_pos + chain_start_pos) -1
+                    ptm_id = seq_as_PTM_id[pep_match_list.index(pept)]
+                    for level in ptm_id:
+                        if int(level) == 1: 
+                            ptm_and_pos = []
+                            for key in ptm_key:
+                                if level == ptm_key[key]:
+                                    ptm_abb = key
+                            level_pos = ptm_id.index(level)
+                            ptm_pos = level_pos + start_pos
+                            ptm_and_pos.append(ptm_abb)
+                            ptm_and_pos.append(ptm_pos)
+                            ptm_pos_type_dict.setdefault(('%s' % chain_sequence), []).append(ptm_and_pos) 
+                        elif int(level) == 2: 
+                            ptm_and_pos = []
+                            for key in ptm_key:
+                                if level == ptm_key[key]:
+                                    ptm_abb = key
+                            level_pos = ptm_id.index(level)
+                            ptm_pos = level_pos + start_pos
+                            ptm_and_pos.append(ptm_abb)
+                            ptm_and_pos.append(ptm_pos)
+                            ptm_pos_type_dict.setdefault(('%s' % chain_sequence), []).append(ptm_and_pos) 
+                        elif int(level) == 3: 
+                            ptm_and_pos = []
+                            for key in ptm_key:
+                                if level == ptm_key[key]:
+                                    ptm_abb = key
+                            level_pos = ptm_id.index(level)
+                            ptm_pos = level_pos + start_pos
+                            ptm_and_pos.append(ptm_abb)
+                            ptm_and_pos.append(ptm_pos)
+                            ptm_pos_type_dict.setdefault(('%s' % chain_sequence), []).append(ptm_and_pos)               
+            
+            for key in pdb_sequence_chain_id_dictionary:
+                ptm_selection_dict[key] = pdb_sequence_chain_id_dictionary[key]
+
+
+    if mode == "PTM":
+        for key in ptm_pos_type_dict:
+            for key2 in ptm_selection_dict:
+                if key in key2:
+                    ptm_append = []
+                    ptm_append.append(ptm_pos_type_dict[key])
+                    ptm_append.append(ptm_selection_dict[key2])
+                    pdb_pept_ranges[pdb] = ptm_append
+
+            
+pymol_png_path = askdirectory(title='Select Folder for Image storage')
+
+if mode == "PTM":
+    for key in pdb_pept_ranges:
+        cmd.reinitialize()
+        cmd.fetch(key)
+        cmd.color('grey', 'all')
+        for i in pdb_pept_ranges[key]:
+            chains = pdb_pept_ranges[key][1]
+            ptm_positions = pdb_pept_ranges[key][0]
+            for chain in chains:
+                for ptm_pos_type in ptm_positions:
+                    ptm_pos = ptm_pos_type[1]
+                    ptm_type = ptm_pos_type [0]
+                    if ptm_type == "PHOS":
+                        ptm_resi = "PHOS_resi"
+                        cmd.select(ptm_resi, 'resi ' + str(ptm_pos) + ' and c. ' + chain)
+                        cmd.color('yellow', ptm_resi)
+                    elif ptm_type == "MET":
+                        ptm_resi = "PHOS_resi"
+                        cmd.select(ptm_resi, 'resi ' + str(ptm_pos) + ' and c. ' + chain)
+                        cmd.color('green', ptm_resi)
+                    elif ptm_type == "OX":
+                        ptm_resi = "PHOS_resi"
+                        cmd.select(ptm_resi, 'resi ' + str(ptm_pos) + ' and c. ' + chain)
+                        cmd.color('blue', ptm_resi)
+        degrees_to_turn = {'x1': ['x','0'],'x': ['x','-120'], 'y1': ['y','120'], 'y2': ['y','120']}
+        image_counter = 1
+        for i in degrees_to_turn:
+            axis = degrees_to_turn[i][0]
+            degrees = degrees_to_turn[i][1]
+            os.chdir(pymol_png_path)
+            cmd.turn(str(axis), int(degrees))
+            cmd.png(key + str(image_counter),dpi=2000, ray=1)
+            image_counter += 1  
+
+if coverage_type == "DC":
+    for key in pdb_start_stop:
+        for key2 in pdb_start_depth_dictionary:
+            if key2 in key:
+                pept_depth = []
+                visualized_sequence = key2
+                entire_pdb_sequence = key
+                start_range = pdb_start_depth_dictionary[key2]
+                end_range = pdb_stop_depth_dictionary[key2]
+                chain_identifier = pdb_start_stop[key]
+                chain_length = pdb_chain_len[key2]
+                depth_counter = 0
+                depth_level = 0
+                for i in range(0, chain_length[0]):
+                    depth_counter +=1
+                    if depth_counter in start_range:
+                        occurence = start_range.count(depth_counter)
+                        if occurence > 1:
+                            depth_level += occurence
+                            pept_depth.append(depth_level)
+                        else:
+                            depth_level += 1
+                            pept_depth.append(depth_level)
+                    elif depth_counter in end_range:
+                        occurence = end_range.count(depth_counter)
+                        if occurence > 1:
+                            depth_level -= occurence
+                            pept_depth.append(depth_level)
+                        else:
+                            depth_level -=1
+                            pept_depth.append(depth_level)
+                    else:
+                            pept_depth.append(depth_level)
+                for j in end_range:
+                        correction = pept_depth[j-1] + 1
+                        pept_depth[j-1] = correction  
+                depth_selection_dictionary.setdefault(visualized_sequence, []).append(pept_depth)        
+                depth_selection_dictionary.setdefault(visualized_sequence, []).append(chain_identifier)     
+
+if coverage_type == "DC":
+    for pdb in pept_chain_match:
+        pdb_sequences = pept_chain_match[pdb]
+        for seq in pdb_sequences:
+            if seq in depth_selection_dictionary:
+                depth_coverage_dictionary.setdefault(pdb, []).append(depth_selection_dictionary[seq])
+    for key in depth_coverage_dictionary:
+        pdb_pept_ranges[key] = depth_coverage_dictionary[key]
+
+if mode == "SC":
+    pept_counter = 0
+    for key in pdb_pept_ranges:
+        cmd.reinitialize()
+        cmd.fetch(key)
+        cmd.color('grey', 'all')
+    # The following code was adapted from the findseq.py script written by Justin Lecher, Troels Schwarz-Linnet, Thomas Holder, Jason Vertrees and Alexander Grishin (available on Github)
+        if coverage_type == "OC":
+            my_dict = {'my_list': []}                                                           # this creates a dictionary called 'my_dict' with my_list as the key
+            cmd.iterate("(name ca)","my_list.append((resi,resn,chain))",space=my_dict)          # this appends the list key with the residue identity, the residue number and the chain
+            IDs = [int(x[0]) for x in my_dict['my_list']]                                       # this line extracts the residue positions from the PDB files 
+            len_IDs = len(IDs)
+            AAs = ''.join([one_letter[x[1]] for x in my_dict['my_list']])                       # this line extracts the residue identity from the PDB files 
+            chains = [x[2] for x in my_dict['my_list']]                                         # this line extracts the chain identity from the PDB files 
+            for user_pept in pept_select_list:
+                peptide = user_pept
+                rePeptide = re.compile(peptide.upper())
+                it = rePeptide.finditer(AAs)
+                rSelName = peptide
+                cmd.select(rSelName, 'None')
+                for i in it:
+                    (start,stop) = i.span()
+                    i_chain = chains[start:stop]
+                    if len(set(i_chain)) != 1:
+                        continue
+                    chain = i_chain[0]
+                    cmd.select(rSelName, rSelName + "( or i. " + str(IDs[start]) + "-" + str(IDs[stop - 1]) + " and c. " + chain + " )")
+                    cmd.color('red',rSelName)
+        
+        degrees_to_turn = {'x1': ['x','0'],'x': ['x','-120'], 'y1': ['y','120'], 'y2': ['y','120']}
+        image_counter = 1
+        for i in degrees_to_turn:
+            axis = degrees_to_turn[i][0]
+            degrees = degrees_to_turn[i][1]
+            os.chdir(pymol_png_path)
+            cmd.turn(str(axis), int(degrees))
+            cmd.png(key + str(image_counter),dpi=2000, ray=1)
+            image_counter += 1
+       
+if coverage_type == "DC":
+    for key in pdb_pept_ranges:
+        cmd.reinitialize()
+        cmd.fetch(key)
+        cmd.color('grey', 'all')
+        for record in pdb_pept_ranges[key]:
+            sequence = record[0]
+            chains = record[1]
+            for chain in chains:
+                for resi_num in range(len(sequence)):
+                    pos = resi_num+1
+                    resi = "residue" + str(pos)
+                    if sequence[resi_num] == 0:
+                        cmd.select(resi, 'resi ' + str(pos) + ' and c. ' + chain)
+                        cmd.color('grey', resi)
+                    elif sequence[resi_num] == 1:
+                        cmd.select(resi, 'resi ' + str(pos) + ' and c. ' + chain)
+                        cmd.color('green', resi)
+                    elif sequence[resi_num] == 2:
+                        cmd.select(resi, 'resi ' + str(pos) + ' and c. ' + chain)
+                        cmd.color('yellow', resi)
+                    elif sequence[resi_num] == 3:
+                        cmd.select(resi, 'resi ' + str(pos) + ' and c. ' + chain)
+                        cmd.color('orange', resi)
+                    elif sequence[resi_num] <= 4:
+                        cmd.select(resi, 'resi ' + str(pos) + ' and c. ' + chain)
+                        cmd.color('red', resi)
+        degrees_to_turn = {'x1': ['x','0'],'x': ['x','-120'], 'y1': ['y','120'], 'y2': ['y','120']}
+        image_counter = 1
+        for i in degrees_to_turn:
+            axis = degrees_to_turn[i][0]
+            degrees = degrees_to_turn[i][1]
+            os.chdir(pymol_png_path)
+            cmd.turn(str(axis), int(degrees))
+            cmd.png(key + str(image_counter),dpi=2000, ray=1)
+            image_counter += 1
+
+
+                    
+                    
+
+
+
+
+
+
+    
+
+    
+
